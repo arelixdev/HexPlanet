@@ -20,14 +20,20 @@ public class HexPlanetGenerator : MonoBehaviour
     [Range(0f, 1f)] public float SeaLevel = 0.38f;
 
     [Header("Mesh Style")]
-    [Range(0.5f, 1f)]  public float TileInset        = 0.80f;  // 1 = raw corner, 0 = tile centre
-    [Range(0f, 0.4f)]  public float CliffThreshold   = 0.10f;  // radius diff above which a cliff appears
-    [Range(0f, 0.5f)]  public float CornerDarken     = 0.25f;  // darkness of corner/edge fills
+    [Range(0.5f, 1f)]  public float TileInset        = 0.80f;
+    [Range(0f, 0.4f)]  public float CliffThreshold   = 0.10f;
+    [Range(0f, 0.5f)]  public float CornerDarken     = 0.25f;
+
+    // ── NEW : jitter organique des coins partagés ──────────────────
+    // Chaque faceCentroid est un coin commun à exactement 3 tuiles.
+    // On le déplace une seule fois → toutes les tuiles voisines
+    // voient le même coin décalé → le mesh reste 100 % connecté.
+    [Range(0f, 0.18f)] public float CornerJitter     = 0.06f;
 
     [Header("Visual")]
     public Material PlanetMaterial;
 
-    // ── Serialised data (survives Play-Mode entry) ─────────────────
+    // ── Serialised data ────────────────────────────────────────────
     [SerializeField] private List<Vector3> tileCenters    = new List<Vector3>();
     [SerializeField] private List<float>   tileElevations = new List<float>();
     [SerializeField] private List<Color>   tileColors     = new List<Color>();
@@ -36,11 +42,9 @@ public class HexPlanetGenerator : MonoBehaviour
     [SerializeField] private List<int> neighborFlat    = new List<int>();
     [SerializeField] private List<int> neighborOffsets = new List<int>();
 
-    // NEW ── flat face list  (3 vertex indices per icosphere triangle)
-    // needed for corner-triangle fills; survives serialisation
     [SerializeField] private List<int> facesFlat = new List<int>();
 
-    // Non-serialised ── rebuilt during Generate() only
+    // Non-serialised ── rebuilt during Generate()
     private List<List<int>> vertFaces     = new List<List<int>>();
     private List<Vector3>   faceCentroids = new List<Vector3>();
 
@@ -53,7 +57,6 @@ public class HexPlanetGenerator : MonoBehaviour
         return neighborFlat.GetRange(start, end - start);
     }
 
-    // ── Public accessors ───────────────────────────────────────────
     public int     TileCount                => tileCount;
     public Vector3 GetTileCenter(int id)    => tileCenters[id];
     public float   GetTileElevation(int id) => tileElevations[id];
@@ -73,7 +76,6 @@ public class HexPlanetGenerator : MonoBehaviour
         }
     }
 
-    // ──────────────────────────────────────────────────────────────
     [ContextMenu("Generate Planet")]
     public void Generate()
     {
@@ -88,7 +90,7 @@ public class HexPlanetGenerator : MonoBehaviour
 
         Random.InitState(Seed);
 
-        StepBuildIcoSphere();
+        StepBuildIcoSphere();   // ← jitter appliqué ici
         StepGenerateTerrain();
         StepBuildMesh();
 
@@ -100,7 +102,7 @@ public class HexPlanetGenerator : MonoBehaviour
     }
 
     // ══════════════════════════════════════════════════════════════
-    // STEP 1 – Icosphere + dual graph
+    // STEP 1 – Icosphere + dual graph + corner jitter
     // ══════════════════════════════════════════════════════════════
     void StepBuildIcoSphere()
     {
@@ -169,6 +171,30 @@ public class HexPlanetGenerator : MonoBehaviour
             facesFlat.Add(f[0]); facesFlat.Add(f[1]); facesFlat.Add(f[2]);
             foreach (int vi in f) vertFaces[vi].Add(fi);
         }
+
+        // ── CORNER JITTER ─────────────────────────────────────────
+        // Chaque faceCentroid[fi] est le coin partagé entre exactement
+        // 3 tuiles.  En le perturbant ici (une seule fois, de façon
+        // tangentielle à la sphère), les 3 tuiles + les strips + les
+        // triangles de coin restent parfaitement connectés.
+        if (CornerJitter > 0.001f)
+        {
+            for (int fi = 0; fi < faceCentroids.Count; fi++)
+            {
+                Vector3 n = faceCentroids[fi];
+
+                // Repère tangent stable
+                Vector3 t = Vector3.Cross(n,
+                    Mathf.Abs(n.y) < 0.9f ? Vector3.up : Vector3.right).normalized;
+                Vector3 b = Vector3.Cross(n, t);
+
+                // Déplacement aléatoire tangentiel (reste sur la sphère unité)
+                float angle = Random.Range(0f, Mathf.PI * 2f);
+                float dist  = Random.Range(0f, CornerJitter);
+
+                faceCentroids[fi] = (n + (t * Mathf.Cos(angle) + b * Mathf.Sin(angle)) * dist).normalized;
+            }
+        }
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -176,6 +202,7 @@ public class HexPlanetGenerator : MonoBehaviour
     // ══════════════════════════════════════════════════════════════
     void StepGenerateTerrain()
     {
+        // ── 1. Bruit continu ──────────────────────────────────────
         Vector3 off = new Vector3(
             Random.Range(-999f,999f),
             Random.Range(-999f,999f),
@@ -200,30 +227,87 @@ public class HexPlanetGenerator : MonoBehaviour
         for (int i=0;i<tileCount;i++)
             tileElevations[i]=Mathf.InverseLerp(eMin,eMax,tileElevations[i]);
 
+        // ── 2. Quantification sur 6 paliers ───────────────────────
+        // Les valeurs exactes des paliers terrestres sont encodées
+        // indépendamment de SeaLevel pour éviter toute collision.
+        // Eau = 0.0 | Paliers terre : 0.20 / 0.40 / 0.60 / 0.80 / 1.00
+        const int Steps = 6;
+        for (int i = 0; i < tileCount; i++)
+        {
+            if (tileElevations[i] < SeaLevel)
+            {
+                tileElevations[i] = 0f;   // toute l'eau au même niveau
+            }
+            else
+            {
+                float t    = Mathf.InverseLerp(SeaLevel, 1f, tileElevations[i]);
+                // Biais vers les paliers bas (plaines/forêt) : racine carrée aplatit la distribution
+                t = Mathf.Sqrt(t);
+                int step = Mathf.Clamp(Mathf.FloorToInt(t * (Steps - 1)) + 1, 1, Steps - 1);
+                tileElevations[i] = step * 0.20f;   // 0.20 / 0.40 / 0.60 / 0.80 / 1.00
+            }
+        }
+
+        // ── 3. Lissage voisin – 2 passes légères (préserve la variété)
+        // 70 % d'adopter le palier majoritaire, ±1 palier max (pas de sauts brutaux)
+        const int SmoothPasses = 2;
+        var smoothed = new float[tileCount];
+
+        for (int pass = 0; pass < SmoothPasses; pass++)
+        {
+            for (int i = 0; i < tileCount; i++)
+            {
+                if (tileElevations[i] == 0f) { smoothed[i] = 0f; continue; }
+
+                var nbs = GetTileNeighbors(i);
+                if (nbs.Count == 0) { smoothed[i] = tileElevations[i]; continue; }
+
+                var counts = new Dictionary<float, int>();
+                float majority = tileElevations[i];
+                int   bestCount = 0;
+                foreach (int ni in nbs)
+                {
+                    float ne = tileElevations[ni];
+                    if (ne == 0f) continue;
+                    counts.TryGetValue(ne, out int c);
+                    counts[ne] = c + 1;
+                    if (counts[ne] > bestCount) { bestCount = counts[ne]; majority = ne; }
+                }
+
+                smoothed[i] = (Random.value < 0.70f) ? majority : tileElevations[i];
+            }
+
+            for (int i = 0; i < tileCount; i++)
+                if (tileElevations[i] != 0f) tileElevations[i] = smoothed[i];
+        }
+
         for (int i=0;i<tileCount;i++)
             tileColors.Add(BiomeColor(i));
     }
 
     Color BiomeColor(int i)
     {
-        float e=tileElevations[i], lat=Mathf.Abs(tileCenters[i].y);
-        if (e < SeaLevel-0.08f) return new Color(0.06f,0.20f,0.60f);
-        if (e < SeaLevel)       return new Color(0.12f,0.38f,0.78f);
-        if (e < SeaLevel+0.03f) return new Color(0.88f,0.82f,0.58f);
-        if (lat > 0.82f)        return new Color(0.92f,0.96f,1.00f);
-        if (e > 0.82f)          return lat>0.55f ? new Color(0.92f,0.96f,1.00f) : new Color(0.48f,0.44f,0.40f);
-        if (e > 0.66f)          return new Color(0.52f,0.48f,0.40f);
-        if (lat > 0.62f)        return new Color(0.52f,0.60f,0.44f);
-        if (e > 0.50f)          return new Color(0.18f,0.50f,0.16f);
-        return                         new Color(0.40f,0.70f,0.20f);
+        // Les seules valeurs possibles après quantification :
+        // 0.00 = Eau | 0.20 = Côte/Plage | 0.40 = Plaine | 0.60 = Forêt | 0.80 = Montagne | 1.00 = Neige
+        float e   = tileElevations[i];
+        float lat = Mathf.Abs(tileCenters[i].y);
+
+        if (e == 0f)    return new Color(0.06f, 0.20f, 0.60f);   // Océan
+        if (e <= 0.20f) return new Color(0.88f, 0.82f, 0.58f);   // Plage / côte
+        if (lat > 0.82f) return new Color(0.92f, 0.96f, 1.00f);  // Polaire (priorité latitude)
+        if (e <= 0.40f) return new Color(0.40f, 0.70f, 0.20f);   // Plaine
+        if (e <= 0.60f) return new Color(0.15f, 0.48f, 0.10f);   // Forêt
+        if (e <= 0.80f) return lat > 0.60f
+                            ? new Color(0.52f, 0.60f, 0.44f)     // Toundra
+                            : new Color(0.52f, 0.48f, 0.40f);    // Montagne
+        // e == 1.00
+        return lat > 0.50f
+            ? new Color(0.92f, 0.96f, 1.00f)                     // Neige polaire
+            : new Color(0.48f, 0.44f, 0.40f);                    // Pic rocheux
     }
 
     // ══════════════════════════════════════════════════════════════
-    // STEP 3 – Organic mesh  (Oskar Stålberg style)
-    //
-    //  Pass 1 – Inset top faces        (each tile slightly smaller)
-    //  Pass 2 – Edge strips / cliffs   (fill gap between neighbours)
-    //  Pass 3 – Corner triangle fills  (fill gap where 3 tiles meet)
+    // STEP 3 – Organic mesh
     // ══════════════════════════════════════════════════════════════
     void StepBuildMesh()
     {
@@ -231,26 +315,20 @@ public class HexPlanetGenerator : MonoBehaviour
         var mT = new List<int>();
         var mC = new List<Color>();
 
-        // ── Per-tile sphere radius ─────────────────────────────────
         float[] R = new float[tileCount];
         for (int i = 0; i < tileCount; i++)
         {
             float e = tileElevations[i];
-            R[i] = PlanetRadius + (e < SeaLevel ? SeaLevel : e) * ElevationScale;
+            // Eau (e==0) → rayon fixe au niveau de la mer ; terre → rayon selon palier
+            R[i] = PlanetRadius + (e == 0f ? 0.20f : e) * ElevationScale;
         }
 
-        // ── Helpers ───────────────────────────────────────────────
-
-        // Inset a raw dual-corner toward its tile's centre for the organic gap
         Vector3 IC(int ti, Vector3 raw) =>
             Vector3.Lerp(tileCenters[ti], raw, TileInset).normalized;
 
-        // Add a quad as two triangles, automatically choosing outward-facing winding.
-        // p0/p1 = first edge, p2/p3 = opposite edge (p0↔p2 and p1↔p3 share a dual corner)
         void AddQuad(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3,
                      Color cTop, Color cBot)
         {
-            // Guarantee normal faces outward from sphere centre
             Vector3 n   = Vector3.Cross(p1-p0, p3-p0);
             Vector3 mid = (p0+p1+p2+p3)*0.25f;
 
@@ -258,9 +336,9 @@ public class HexPlanetGenerator : MonoBehaviour
             mV.Add(p0); mV.Add(p1); mV.Add(p2); mV.Add(p3);
             mC.Add(cTop); mC.Add(cTop); mC.Add(cBot); mC.Add(cBot);
 
-            if (Vector3.Dot(n, mid) >= 0)               // already outward
+            if (Vector3.Dot(n, mid) >= 0)
             { mT.Add(b); mT.Add(b+1); mT.Add(b+3); mT.Add(b); mT.Add(b+3); mT.Add(b+2); }
-            else                                         // flip winding
+            else
             { mT.Add(b); mT.Add(b+3); mT.Add(b+1); mT.Add(b); mT.Add(b+2); mT.Add(b+3); }
         }
 
@@ -274,13 +352,19 @@ public class HexPlanetGenerator : MonoBehaviour
             Color   col    = tileColors[vi];
             Vector3 centre = tileCenters[vi];
 
-            // Dual corners sorted CCW, then inset toward tile centre
             var rawC = SortAround(centre, fids.Select(fi => faceCentroids[fi]).ToList());
             var inC  = rawC.Select(c => IC(vi, c)).ToList();
 
+            // Vérifie si tous les voisins partagent le même biome
+            // → si oui, coins identiques au centre (pas de liseré)
+            var neighbors = GetTileNeighbors(vi);
+            bool allSame  = neighbors.Count > 0
+                         && neighbors.All(ni => ColorsSimilar(tileColors[vi], tileColors[ni], 0.08f));
+            Color edgeCol = allSame ? col : col * 0.88f;
+
             int b = mV.Count;
-            mV.Add(centre * r); mC.Add(col);                    // centre vertex
-            foreach (var c in inC) { mV.Add(c * r); mC.Add(col * 0.88f); }
+            mV.Add(centre * r); mC.Add(col);
+            foreach (var c in inC) { mV.Add(c * r); mC.Add(edgeCol); }
 
             for (int ci = 0; ci < inC.Count; ci++)
                 { mT.Add(b); mT.Add(b+1+ci); mT.Add(b+1+(ci+1)%inC.Count); }
@@ -295,11 +379,10 @@ public class HexPlanetGenerator : MonoBehaviour
             {
                 if (!processed.Add(EKey(vi, ni))) continue;
 
-                // The two icosphere faces shared by vi and ni give us
-                // the two endpoints of the shared dual edge
                 var sf = vertFaces[vi].Intersect(vertFaces[ni]).ToList();
                 if (sf.Count < 2) continue;
 
+                // Les raw0/raw1 sont les coins jittés → strips suivent automatiquement
                 Vector3 raw0 = faceCentroids[sf[0]];
                 Vector3 raw1 = faceCentroids[sf[1]];
 
@@ -312,21 +395,22 @@ public class HexPlanetGenerator : MonoBehaviour
 
                 if (absDiff <= CliffThreshold)
                 {
-                    // ── Smooth connector (same height or tiny step) ──
-                    Color fc = Color.Lerp(tileColors[vi], tileColors[ni], 0.5f)
-                               * (1f - CornerDarken * 0.5f);
+                    // Même biome + élévation proche → strip invisible (couleur exacte, pas d'assombrissement)
+                    bool sameBiome = ColorsSimilar(tileColors[vi], tileColors[ni], 0.08f);
+                    Color fc = sameBiome
+                        ? Color.Lerp(tileColors[vi], tileColors[ni], 0.5f)          // seamless
+                        : Color.Lerp(tileColors[vi], tileColors[ni], 0.5f)
+                          * (1f - CornerDarken * 0.5f);                              // démarcation légère entre biomes différents
                     AddQuad(a0, a1, b0, b1, fc, fc);
                 }
                 else
                 {
-                    // ── Cliff ─────────────────────────────────────
                     bool aHigh = diff > 0;
                     int  hiTile = aHigh ? vi : ni;
 
                     Vector3 h0 = aHigh ? a0 : b0,  h1 = aHigh ? a1 : b1;
                     Vector3 l0 = aHigh ? b0 : a0,  l1 = aHigh ? b1 : a1;
 
-                    // Rocky grey-brown cliff derived from the higher tile's colour
                     Color hiC  = tileColors[hiTile];
                     Color cliff = new Color(
                         hiC.r * 0.50f + 0.08f,
@@ -339,8 +423,6 @@ public class HexPlanetGenerator : MonoBehaviour
         }
 
         // ── PASS 3 : CORNER TRIANGLE FILLS ────────────────────────
-        // Each icosphere face centroid is a meeting point of 3 tiles.
-        // Fill the small triangle gap left by the inset with a darker tri.
         int faceCount = faceCentroids.Count;
 
         for (int fi = 0; fi < faceCount; fi++)
@@ -349,16 +431,18 @@ public class HexPlanetGenerator : MonoBehaviour
             int t1 = facesFlat[fi*3+1];
             int t2 = facesFlat[fi*3+2];
 
+            // Le coin jitté est le même pour les 3 tuiles → pas de trou
             Vector3 raw = faceCentroids[fi];
             Vector3 p0  = IC(t0, raw) * R[t0];
             Vector3 p1  = IC(t1, raw) * R[t1];
             Vector3 p2  = IC(t2, raw) * R[t2];
 
-            // Blend the 3 tile colours and darken to make corners recede
-            Color c = (tileColors[t0] + tileColors[t1] + tileColors[t2]) / 3f
-                      * (1f - CornerDarken);
+            // Même biome pour les 3 tuiles → triangle de coin invisible (pas d'assombrissement)
+            bool sameCorner = ColorsSimilar(tileColors[t0], tileColors[t1], 0.08f)
+                           && ColorsSimilar(tileColors[t1], tileColors[t2], 0.08f);
+            Color avg = (tileColors[t0] + tileColors[t1] + tileColors[t2]) / 3f;
+            Color c   = sameCorner ? avg : avg * (1f - CornerDarken);
 
-            // Outward-facing winding check
             Vector3 n   = Vector3.Cross(p1-p0, p2-p0);
             Vector3 mid = (p0+p1+p2)/3f;
 
@@ -372,7 +456,7 @@ public class HexPlanetGenerator : MonoBehaviour
                 { mT.Add(b); mT.Add(b+2); mT.Add(b+1); }
         }
 
-        // ── Assemble and assign mesh ───────────────────────────────
+        // ── Assemble mesh ──────────────────────────────────────────
         var mesh = new Mesh { name = "HexPlanet" };
         mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
         mesh.SetVertices(mV);
@@ -418,28 +502,33 @@ public class HexPlanetGenerator : MonoBehaviour
         float lat=Mathf.Abs(tileCenters[id].y);
         var nb=GetTileNeighbors(id);
         return $"Tile #{id}\n" +
-               $"Biome    : {GetBiomeName(id)} ({(e<SeaLevel?"Water":"Land")})\n" +
-               $"Elevation: {e:F3}  |  Latitude: {lat:F2}\n" +
+               $"Biome    : {GetBiomeName(id)} ({(e==0f?"Water":"Land")})\n" +
+               $"Elevation: {e:F2}  |  Latitude: {lat:F2}\n" +
                $"Neighbours: {nb.Count}";
     }
 
     public string GetBiomeName(int id)
     {
-        float e=tileElevations[id], lat=Mathf.Abs(tileCenters[id].y);
-        if (e<SeaLevel-0.08f) return "Deep Ocean";
-        if (e<SeaLevel)       return "Shallow Water";
-        if (e<SeaLevel+0.03f) return "Beach";
-        if (lat>0.82f)        return "Polar";
-        if (e>0.82f)          return lat>0.55f?"Snow":"Mountain";
-        if (e>0.66f)          return "Highland";
-        if (lat>0.62f)        return "Tundra";
-        if (e>0.50f)          return "Forest";
-        return "Plains";
+        float e   = tileElevations[id];
+        float lat = Mathf.Abs(tileCenters[id].y);
+        if (e == 0f)    return "Ocean";
+        if (e <= 0.20f) return "Beach";
+        if (lat > 0.82f) return "Polar";
+        if (e <= 0.40f) return "Plains";
+        if (e <= 0.60f) return "Forest";
+        if (e <= 0.80f) return lat > 0.60f ? "Tundra" : "Mountain";
+        return lat > 0.50f ? "Snow" : "Peak";
     }
 
     // ══════════════════════════════════════════════════════════════
     // UTILITIES
     // ══════════════════════════════════════════════════════════════
+    // Retourne vrai si deux couleurs sont proches (même biome visuel)
+    static bool ColorsSimilar(Color a, Color b, float threshold) =>
+        Mathf.Abs(a.r - b.r) < threshold &&
+        Mathf.Abs(a.g - b.g) < threshold &&
+        Mathf.Abs(a.b - b.b) < threshold;
+
     List<Vector3> SortAround(Vector3 axis, List<Vector3> pts)
     {
         Vector3 up  = Mathf.Abs(Vector3.Dot(axis,Vector3.up))<0.99f?Vector3.up:Vector3.right;
