@@ -231,20 +231,22 @@ public class HexPlanetGenerator : MonoBehaviour
         // Les valeurs exactes des paliers terrestres sont encodées
         // indépendamment de SeaLevel pour éviter toute collision.
         // Eau = 0.0 | Paliers terre : 0.20 / 0.40 / 0.60 / 0.80 / 1.00
-        const int Steps = 6;
         for (int i = 0; i < tileCount; i++)
         {
             if (tileElevations[i] < SeaLevel)
             {
-                tileElevations[i] = 0f;   // toute l'eau au même niveau
+                tileElevations[i] = 0f;
             }
             else
             {
-                float t    = Mathf.InverseLerp(SeaLevel, 1f, tileElevations[i]);
-                // Biais vers les paliers bas (plaines/forêt) : racine carrée aplatit la distribution
-                t = Mathf.Sqrt(t);
-                int step = Mathf.Clamp(Mathf.FloorToInt(t * (Steps - 1)) + 1, 1, Steps - 1);
-                tileElevations[i] = step * 0.20f;   // 0.20 / 0.40 / 0.60 / 0.80 / 1.00
+                float t = Mathf.InverseLerp(SeaLevel, 1f, tileElevations[i]);
+                int step;
+                if      (t < 0.12f) step = 1; // Beach    → 0.20  (~12%)
+                else if (t < 0.35f) step = 2; // Plains   → 0.40  (~50%) ← majoritaire
+                else if (t < 0.68f) step = 3; // Forest   → 0.60  (~16%)
+                else if (t < 0.90f) step = 4; // Mountain → 0.80  (~16%)
+                else                step = 5; // Snow     → 1.00  (~6%)
+                tileElevations[i] = step * 0.20f;
             }
         }
 
@@ -355,16 +357,9 @@ public class HexPlanetGenerator : MonoBehaviour
             var rawC = SortAround(centre, fids.Select(fi => faceCentroids[fi]).ToList());
             var inC  = rawC.Select(c => IC(vi, c)).ToList();
 
-            // Vérifie si tous les voisins partagent le même biome
-            // → si oui, coins identiques au centre (pas de liseré)
-            var neighbors = GetTileNeighbors(vi);
-            bool allSame  = neighbors.Count > 0
-                         && neighbors.All(ni => ColorsSimilar(tileColors[vi], tileColors[ni], 0.08f));
-            Color edgeCol = allSame ? col : col * 0.88f;
-
             int b = mV.Count;
             mV.Add(centre * r); mC.Add(col);
-            foreach (var c in inC) { mV.Add(c * r); mC.Add(edgeCol); }
+            foreach (var c in inC) { mV.Add(c * r); mC.Add(col); }
 
             for (int ci = 0; ci < inC.Count; ci++)
                 { mT.Add(b); mT.Add(b+1+ci); mT.Add(b+1+(ci+1)%inC.Count); }
