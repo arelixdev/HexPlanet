@@ -538,14 +538,16 @@ public class HexPlanetGenerator : MonoBehaviour
 
     public string GetBiomeName(int id)
     {
-        float e   = tileElevations[id];
-        float lat = Mathf.Abs(tileCenters[id].y);
-        if (e == 0f)    return "Ocean";
-        if (e <= 0.20f) return "Beach";
+        if (id < 0 || id >= tileCount) return "Invalid";
+        float lat  = Mathf.Abs(tileCenters[id].y);
+        int   step = (tileBiomeSteps.Count > id) ? tileBiomeSteps[id] : 0;
+
+        if (step == 0)  return "Ocean";
+        if (step == 1)  return "Beach";
         if (lat > 0.82f) return "Polar";
-        if (e <= 0.40f) return "Plains";
-        if (e <= 0.60f) return "Forest";
-        if (e <= 0.80f) return lat > 0.60f ? "Tundra" : "Mountain";
+        if (step == 2)  return "Plains";
+        if (step == 3)  return "Forest";   // ← maintenant correct
+        if (step == 4)  return lat > 0.60f ? "Tundra" : "Mountain";
         return lat > 0.50f ? "Snow" : "Peak";
     }
 
