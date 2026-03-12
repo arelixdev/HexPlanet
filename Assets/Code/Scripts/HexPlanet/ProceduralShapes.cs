@@ -176,6 +176,149 @@ public class FirTreeShape : TileShape
     }
 }
 
+// ── Arbre dôme (tropical / équatorial) ───────────────────────────
+// Tronc cylindrique + canopée en demi-sphère aplatie ou étirée.
+// DomeScaleY < 1  →  dôme écrasé (savane / chêne)
+// DomeScaleY > 1  →  dôme étiré  (palmier / eucalyptus)
+// La règle de mélange Dôme↔Pin est entièrement gérée par TileObjectSpawner.
+public class DomeTreeShape : TileShape
+{
+    public int   Segments     = 8;
+    public int   Rings        = 5;
+
+    // Tronc
+    public float TrunkRadius  = 0.018f;
+    public float TrunkHeight  = 0.14f;
+    public Color TrunkColor   = new Color(0.32f, 0.20f, 0.09f);
+
+    // Canopée
+    public float DomeRadius   = 0.13f;
+    /// <summary>Échelle verticale du dôme : 0.6 = aplati (savane), 1.4 = allongé (palmier).</summary>
+    public float DomeScaleY   = 1.0f;
+    public Color DomeColorBot = new Color(0.18f, 0.58f, 0.12f);
+    public Color DomeColorTop = new Color(0.35f, 0.75f, 0.18f);
+
+    /// <summary>Empreinte au sol utilisée par TileObjectSpawner pour éviter les overlaps.</summary>
+    public float Footprint => DomeRadius * 0.95f;
+
+    public override Mesh Build(float scale)
+    {
+        var verts  = new List<Vector3>();
+        var colors = new List<Color>();
+        var tris   = new List<int>();
+
+        float tr  = TrunkRadius * scale;
+        float th  = TrunkHeight * scale;
+        float dr  = DomeRadius  * scale;
+        // Centre du dôme : légèrement au-dessus du haut du tronc
+        float dcy = th + dr * DomeScaleY * 0.20f;
+
+        // ── Tronc ──────────────────────────────────────────────────
+        DomeCylinder(verts, colors, tris,
+                     baseY: 0f, topY: th,
+                     baseR: tr, topR: tr * 0.65f,
+                     col: TrunkColor, seg: 6);
+
+        // ── Dôme (demi-sphère UV, de phi≈−PI/5 à phi=PI/2) ────────
+        // phiBot légèrement négatif → la canopée enveloppe bien le haut du tronc
+        const float phiBot = -0.628f;   // ≈ −PI/5
+        const float phiTop =  1.571f;   // ≈   PI/2
+
+        int seg      = Segments;
+        int domeBase = verts.Count;
+
+        // Sommet
+        verts.Add(new Vector3(0f, dcy + dr * DomeScaleY, 0f));
+        colors.Add(DomeColorTop);
+
+        // Anneaux de phiTop → phiBot
+        for (int r = 0; r <= Rings; r++)
+        {
+            float phi   = Mathf.Lerp(phiTop, phiBot, (float)r / Rings);
+            float ringY = dcy + Mathf.Sin(phi) * dr * DomeScaleY;
+            float ringR = Mathf.Cos(phi) * dr;
+            float t     = 1f - (float)r / Rings;
+            Color c     = Color.Lerp(DomeColorBot, DomeColorTop, t * t);
+
+            for (int s = 0; s < seg; s++)
+            {
+                float a = s * Mathf.PI * 2f / seg;
+                verts.Add(new Vector3(Mathf.Cos(a) * ringR, ringY, Mathf.Sin(a) * ringR));
+                colors.Add(c);
+            }
+        }
+
+        // Centre bas (ferme le bas de la canopée)
+        int   botCenter = verts.Count;
+        float botY      = dcy + Mathf.Sin(phiBot) * dr * DomeScaleY;
+        verts.Add(new Vector3(0f, botY, 0f));
+        colors.Add(DomeColorBot * 0.80f);
+
+        // ── Triangulation ──────────────────────────────────────────
+        int topIdx = domeBase;
+
+        // Calotte supérieure
+        for (int s = 0; s < seg; s++)
+        {
+            tris.Add(topIdx);
+            tris.Add(domeBase + 1 + (s + 1) % seg);
+            tris.Add(domeBase + 1 + s);
+        }
+
+        // Bandes latérales
+        for (int r = 0; r < Rings; r++)
+        {
+            int row0 = domeBase + 1 + r * seg;
+            int row1 = row0 + seg;
+            for (int s = 0; s < seg; s++)
+            {
+                int a = row0 + s,             b = row0 + (s + 1) % seg;
+                int c = row1 + s,             d = row1 + (s + 1) % seg;
+                tris.Add(a); tris.Add(b); tris.Add(c);
+                tris.Add(b); tris.Add(d); tris.Add(c);
+            }
+        }
+
+        // Calotte inférieure
+        int lastRow = domeBase + 1 + Rings * seg;
+        for (int s = 0; s < seg; s++)
+        {
+            tris.Add(botCenter);
+            tris.Add(lastRow + s);
+            tris.Add(lastRow + (s + 1) % seg);
+        }
+
+        var mesh = new Mesh { name = "DomeTree" };
+        mesh.SetVertices(verts);
+        mesh.SetTriangles(tris, 0);
+        mesh.SetColors(colors);
+        mesh.RecalculateNormals();
+        return mesh;
+    }
+
+    // Cylindre autonome (pas de dépendance à FirTreeShape)
+    void DomeCylinder(List<Vector3> verts, List<Color> colors, List<int> tris,
+                      float baseY, float topY, float baseR, float topR,
+                      Color col, int seg)
+    {
+        int start = verts.Count;
+        for (int i = 0; i < seg; i++)
+        {
+            float a = i * Mathf.PI * 2f / seg;
+            float cx = Mathf.Cos(a), cz = Mathf.Sin(a);
+            verts.Add(new Vector3(cx * baseR, baseY, cz * baseR)); colors.Add(col);
+            verts.Add(new Vector3(cx * topR,  topY,  cz * topR));  colors.Add(col * 1.1f);
+        }
+        for (int i = 0; i < seg; i++)
+        {
+            int b0 = start + i * 2;
+            int b1 = start + ((i + 1) % seg) * 2;
+            tris.Add(b0); tris.Add(b1);     tris.Add(b0 + 1);
+            tris.Add(b1); tris.Add(b1 + 1); tris.Add(b0 + 1);
+        }
+    }
+}
+
 // ── Cône simple (legacy) ──────────────────────────────────────────
 public class ConeShape : TileShape
 {
