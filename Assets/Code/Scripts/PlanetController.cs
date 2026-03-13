@@ -1,99 +1,171 @@
 using UnityEngine;
 
+/// <summary>
+/// Orbit camera around the planet (planet stays still).
+/// • Drag  → orbit (azimuth + elevation)
+/// • Scroll → zoom
+/// • Click  → tile selection (unchanged)
+/// • Auto-orbit when idle
+/// </summary>
 public class PlanetController : MonoBehaviour
 {
-    [Header("Rotation")]
-    public float RotateSpeed = 20f;
-    public bool AutoRotate = true;
+    // ── Inspector ──────────────────────────────────────────────────
+    [Header("Orbit")]
+    [Tooltip("Degrees per pixel dragged.")]
+    public float OrbitSensitivity = 0.35f;
+    [Tooltip("Slow auto-orbit speed (deg/sec) when not dragging.")]
+    public float AutoOrbitSpeed   = 6f;
+    public bool  AutoRotate       = true;
+
+    [Header("Zoom")]
+    public float ZoomSpeed  = 5f;
+    public float MinDistance = 8f;
+    public float MaxDistance = 40f;
 
     [Header("Interaction")]
     public HexPlanetGenerator Generator;
     public bool ShowTileDebug = true;
 
+    // ── Private state ──────────────────────────────────────────────
     private Camera _cam;
+
+    // Spherical coords (degrees)
+    private float _azimuth   =  30f;   // horizontal angle around Y
+    private float _elevation =  25f;   // vertical angle from equator
+    private float _distance  =  22f;   // camera distance from planet centre
+
+    // Drag bookkeeping
     private Vector3 _mouseDownPos;
-    private bool _clickValid;          // true si le mousedown n'a pas bougé assez pour être un drag
+    private bool    _clickValid;
+    private Vector3 _dragLastPos = Vector3.zero;
+
+    // UI
     private int _lastHighlightedTile = -1;
 
-    const float DragThreshold = 5f;   // pixels
+    const float DragThreshold = 5f;   // pixels before drag is recognised
 
+    // ──────────────────────────────────────────────────────────────
     void Start()
     {
         _cam = Camera.main;
 
+        // Initialise distance from current camera position so the scene
+        // view position is respected on first play.
+        if (_cam != null)
+            _distance = Mathf.Clamp(
+                Vector3.Distance(_cam.transform.position, transform.position),
+                MinDistance, MaxDistance);
+
+        ApplyCameraTransform();
+
+        // Safety checks
         var meshChild = transform.Find("HexPlanetMesh");
         if (meshChild == null)
-            Debug.LogWarning("[PlanetController] HexPlanetMesh introuvable — génère d'abord la planète.");
+            Debug.LogWarning("[PlanetController] HexPlanetMesh not found — generate the planet first.");
         else if (meshChild.GetComponent<MeshCollider>() == null)
-            Debug.LogWarning("[PlanetController] Pas de MeshCollider sur HexPlanetMesh — régénère la planète !");
+            Debug.LogWarning("[PlanetController] No MeshCollider on HexPlanetMesh — regenerate the planet!");
         else
-            Debug.Log("[PlanetController] Prêt. MeshCollider détecté.");
+            Debug.Log("[PlanetController] Ready. MeshCollider detected.");
     }
 
+    // ──────────────────────────────────────────────────────────────
     void Update()
     {
         HandleInput();
     }
 
+    // ──────────────────────────────────────────────────────────────
     void HandleInput()
     {
-        // ── Début du clic ──────────────────────────────────────────
+        // ── Mouse button down ──────────────────────────────────────
         if (Input.GetMouseButtonDown(0))
         {
             _mouseDownPos = Input.mousePosition;
             _clickValid   = true;
+            _dragLastPos  = Input.mousePosition;
         }
 
-        // ── Pendant le maintien ────────────────────────────────────
+        // ── While held ────────────────────────────────────────────
         if (Input.GetMouseButton(0))
         {
             Vector3 delta = Input.mousePosition - _mouseDownPos;
 
             if (_clickValid && delta.magnitude > DragThreshold)
-                _clickValid = false;   // trop de mouvement → c'est un drag, pas un clic
+                _clickValid = false;    // too much movement → it's a drag
 
-            if (!_clickValid)          // on est en mode drag → on tourne la planète
+            if (!_clickValid)
             {
-                Vector3 frameDelta = Input.mousePosition - _mouseDownPos;
-                // utilise un lastPos dédié au drag
-                if (_dragLastPos != Vector3.zero)
-                {
-                    Vector3 d = Input.mousePosition - _dragLastPos;
-                    transform.Rotate(Vector3.up, -d.x * RotateSpeed * Time.deltaTime, Space.World);
-                    transform.Rotate(_cam.transform.right, d.y * RotateSpeed * Time.deltaTime, Space.World);
-                }
+                Vector3 d = Input.mousePosition - _dragLastPos;
+
+                // Horizontal drag → azimuth (left/right orbit)
+                _azimuth += d.x * OrbitSensitivity;
+
+                // Vertical drag → elevation (up/down orbit)
+                _elevation += d.y * OrbitSensitivity;
+                _elevation  = Mathf.Clamp(_elevation, -89f, 89f);
+
                 _dragLastPos = Input.mousePosition;
+                ApplyCameraTransform();
             }
         }
 
-        // ── Relâchement ────────────────────────────────────────────
+        // ── Release ───────────────────────────────────────────────
         if (Input.GetMouseButtonUp(0))
         {
-            _dragLastPos = Vector3.zero;
-
-            if (_clickValid)           // le bouton a été relâché sans drag → c'est un vrai clic
+            if (_clickValid)
                 TrySelectTile();
 
-            _clickValid = false;
+            _clickValid  = false;
+            _dragLastPos = Vector3.zero;
         }
 
-        // ── Auto-rotation quand pas de souris enfoncée ─────────────
+        // ── Auto-orbit when no mouse button pressed ───────────────
         if (AutoRotate && !Input.GetMouseButton(0))
-            transform.Rotate(Vector3.up, 2f * Time.deltaTime, Space.World);
+        {
+            _azimuth += AutoOrbitSpeed * Time.deltaTime;
+            ApplyCameraTransform();
+        }
 
-        // ── Zoom ───────────────────────────────────────────────────
+        // ── Zoom ──────────────────────────────────────────────────
         float scroll = Input.GetAxis("Mouse ScrollWheel");
         if (Mathf.Abs(scroll) > 0.001f)
-            _cam.transform.position += _cam.transform.forward * scroll * 5f;
+        {
+            _distance -= scroll * ZoomSpeed;
+            _distance  = Mathf.Clamp(_distance, MinDistance, MaxDistance);
+            ApplyCameraTransform();
+        }
     }
 
-    private Vector3 _dragLastPos = Vector3.zero;
+    // ──────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Reposition the camera on its spherical orbit around the planet.
+    /// The planet transform is NOT touched.
+    /// </summary>
+    void ApplyCameraTransform()
+    {
+        if (_cam == null) return;
 
+        // Convert spherical → Cartesian (Y-up)
+        float azRad  = _azimuth   * Mathf.Deg2Rad;
+        float elRad  = _elevation * Mathf.Deg2Rad;
+
+        Vector3 dir = new Vector3(
+            Mathf.Cos(elRad) * Mathf.Sin(azRad),
+            Mathf.Sin(elRad),
+            Mathf.Cos(elRad) * Mathf.Cos(azRad)
+        );
+
+        Vector3 planetPos = transform.position;
+        _cam.transform.position = planetPos + dir * _distance;
+        _cam.transform.LookAt(planetPos, Vector3.up);
+    }
+
+    // ──────────────────────────────────────────────────────────────
     void TrySelectTile()
     {
         if (Generator == null)
         {
-            Debug.LogWarning("[PlanetController] Generator non assigné dans l'Inspector !");
+            Debug.LogWarning("[PlanetController] Generator not assigned in Inspector!");
             return;
         }
 
@@ -102,27 +174,26 @@ public class PlanetController : MonoBehaviour
 
         if (!Physics.Raycast(ray, out var hit, 500f))
         {
-            Debug.Log("[PlanetController] Raycast : rien touché.");
+            Debug.Log("[PlanetController] Raycast: nothing hit.");
             return;
         }
 
-        // Accepte le hit sur l'enfant OU sur le parent
         bool hitPlanet = hit.transform == transform
                       || hit.transform.IsChildOf(transform);
 
         if (!hitPlanet)
         {
-            Debug.Log($"[PlanetController] Hit sur '{hit.transform.name}' — pas la planète.");
+            Debug.Log($"[PlanetController] Hit '{hit.transform.name}' — not the planet.");
             return;
         }
 
-        // Convertit le point world → espace local normalisé
+        // World → local normalised direction
         Vector3 localHit = Generator.transform.InverseTransformPoint(hit.point).normalized;
         int tileId = Generator.GetClosestTileId(localHit);
 
         if (tileId < 0)
         {
-            Debug.Log("[PlanetController] GetClosestTileId a retourné -1.");
+            Debug.Log("[PlanetController] GetClosestTileId returned -1.");
             return;
         }
 
@@ -132,6 +203,7 @@ public class PlanetController : MonoBehaviour
             Debug.Log(Generator.GetTileInfo(tileId));
     }
 
+    // ──────────────────────────────────────────────────────────────
     void OnGUI()
     {
         if (!ShowTileDebug || _lastHighlightedTile < 0 || Generator == null) return;
