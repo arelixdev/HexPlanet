@@ -22,15 +22,23 @@ public class HexPlanetGenerator : MonoBehaviour
     [Header("Mesh Style")]
     [Range(0.5f, 1f)]  public float TileInset        = 0.80f;
     [Range(0f, 0.4f)]  public float CliffThreshold   = 0.10f;
-
-    // ── NEW : jitter organique des coins partagés ──────────────────
-    // Chaque faceCentroid est un coin commun à exactement 3 tuiles.
-    // On le déplace une seule fois → toutes les tuiles voisines
-    // voient le même coin décalé → le mesh reste 100 % connecté.
     [Range(0f, 0.18f)] public float CornerJitter     = 0.06f;
 
     [Header("Visual")]
     public Material PlanetMaterial;
+
+    // ── ATMOSPHERE ─────────────────────────────────────────────────
+    [Header("Atmosphere")]
+    public bool ShowAtmosphere = true;
+    /// <summary>Material using the Custom/Atmosphere shader.</summary>
+    public Material AtmosphereMaterial;
+    [Range(1.01f, 1.35f)] public float AtmosphereScale     = 1.10f;
+    [ColorUsage(true, true)] public Color AtmosphereColor = new Color(0.30f, 0.55f, 1.00f, 1f);
+    [ColorUsage(true, true)] public Color AtmosphereRimColor = new Color(0.15f, 0.35f, 0.90f, 1f);
+    [Range(0.5f, 8f)] public float AtmospherePower     = 3.2f;
+    [Range(0f, 3f)]   public float AtmosphereIntensity = 1.4f;
+    [Range(0f, 1f)]   public float AtmosphereInnerOpacity = 0.04f;
+    [Range(0f, 1f)]   public float AtmosphereRimWidth = 0.72f;
 
     // ── Serialised data ────────────────────────────────────────────
     [SerializeField] private List<Vector3> tileCenters    = new List<Vector3>();
@@ -44,7 +52,7 @@ public class HexPlanetGenerator : MonoBehaviour
 
     [SerializeField] private List<int> facesFlat = new List<int>();
 
-    // Non-serialised ── rebuilt during Generate()
+    // Non-serialised
     private List<List<int>> vertFaces     = new List<List<int>>();
     private List<Vector3>   faceCentroids = new List<Vector3>();
 
@@ -61,7 +69,6 @@ public class HexPlanetGenerator : MonoBehaviour
     public Vector3 GetTileCenter(int id)    => tileCenters[id];
     public float   GetTileElevation(int id) => tileElevations[id];
     public Color   GetTileColor(int id)     => tileColors[id];
-
     public int GetTileBiomeStep(int id) => (tileBiomeSteps.Count > id) ? tileBiomeSteps[id] : 0;
 
     // ──────────────────────────────────────────────────────────────
@@ -92,9 +99,10 @@ public class HexPlanetGenerator : MonoBehaviour
 
         Random.InitState(Seed);
 
-        StepBuildIcoSphere();   // ← jitter appliqué ici
+        StepBuildIcoSphere();
         StepGenerateTerrain();
         StepBuildMesh();
+        StepBuildAtmosphere();   // ← NEW
 
         Debug.Log($"[HexPlanet] {tileCount} tiles generated (subdivisions={Subdivisions})");
 
@@ -143,7 +151,6 @@ public class HexPlanetGenerator : MonoBehaviour
         tileCenters = new List<Vector3>(verts);
         tileCount   = tileCenters.Count;
 
-        // ── Neighbour graph ────────────────────────────────────────
         var nbLists = Enumerable.Range(0, tileCount).Select(_ => new List<int>()).ToList();
         var seen    = new HashSet<long>();
         foreach (var f in faces)
@@ -161,7 +168,6 @@ public class HexPlanetGenerator : MonoBehaviour
         for (int i = 0; i < tileCount; i++)
         { neighborOffsets.Add(neighborFlat.Count); neighborFlat.AddRange(nbLists[i]); }
 
-        // ── vertFaces, faceCentroids, facesFlat ───────────────────
         vertFaces = Enumerable.Range(0, tileCount).Select(_ => new List<int>()).ToList();
         faceCentroids.Clear();
         facesFlat.Clear();
@@ -174,26 +180,16 @@ public class HexPlanetGenerator : MonoBehaviour
             foreach (int vi in f) vertFaces[vi].Add(fi);
         }
 
-        // ── CORNER JITTER ─────────────────────────────────────────
-        // Chaque faceCentroid[fi] est le coin partagé entre exactement
-        // 3 tuiles.  En le perturbant ici (une seule fois, de façon
-        // tangentielle à la sphère), les 3 tuiles + les strips + les
-        // triangles de coin restent parfaitement connectés.
         if (CornerJitter > 0.001f)
         {
             for (int fi = 0; fi < faceCentroids.Count; fi++)
             {
                 Vector3 n = faceCentroids[fi];
-
-                // Repère tangent stable
                 Vector3 t = Vector3.Cross(n,
                     Mathf.Abs(n.y) < 0.9f ? Vector3.up : Vector3.right).normalized;
                 Vector3 b = Vector3.Cross(n, t);
-
-                // Déplacement aléatoire tangentiel (reste sur la sphère unité)
                 float angle = Random.Range(0f, Mathf.PI * 2f);
                 float dist  = Random.Range(0f, CornerJitter);
-
                 faceCentroids[fi] = (n + (t * Mathf.Cos(angle) + b * Mathf.Sin(angle)) * dist).normalized;
             }
         }
@@ -205,7 +201,6 @@ public class HexPlanetGenerator : MonoBehaviour
     void StepGenerateTerrain()
     {
         tileBiomeSteps.Clear();
-        // ── 1. Bruit continu ──────────────────────────────────────
         Vector3 off = new Vector3(
             Random.Range(-999f,999f),
             Random.Range(-999f,999f),
@@ -230,35 +225,29 @@ public class HexPlanetGenerator : MonoBehaviour
         for (int i=0;i<tileCount;i++)
             tileElevations[i]=Mathf.InverseLerp(eMin,eMax,tileElevations[i]);
 
-        // ── 2. Quantification sur 6 paliers ───────────────────────
-        // Les valeurs exactes des paliers terrestres sont encodées
-        // indépendamment de SeaLevel pour éviter toute collision.
-        // Eau = 0.0 | Paliers terre : 0.20 / 0.40 / 0.60 / 0.80 / 1.00
         for (int i = 0; i < tileCount; i++)
         {
             if (tileElevations[i] < SeaLevel)
             {
                 tileElevations[i] = 0f;
-                tileBiomeSteps.Add(0); // ← AJOUT : océan doit aussi pousser dans la liste
+                tileBiomeSteps.Add(0);
             }
             else
             {
                 float t = Mathf.InverseLerp(SeaLevel, 1f, tileElevations[i]);
                 int step;
-                if      (t < 0.12f) step = 1; // Beach
-                else if (t < 0.35f) step = 2; // Plains
-                else if (t < 0.50f) step = 3; // Forest ← était 2, corrigé en 3
-                else if (t < 0.88f) step = 4; // Mountain
-                else                step = 5; // Snow
+                if      (t < 0.12f) step = 1;
+                else if (t < 0.35f) step = 2;
+                else if (t < 0.50f) step = 3;
+                else if (t < 0.88f) step = 4;
+                else                step = 5;
 
                 tileBiomeSteps.Add(step);
-                int elevStep = (step == 3) ? 2 : step; // Forêt → même hauteur que plaine
+                int elevStep = (step == 3) ? 2 : step;
                 tileElevations[i] = elevStep * 0.20f;
             }
         }
 
-        // ── 3. Lissage voisin – 2 passes légères (préserve la variété)
-        // 70 % d'adopter le palier majoritaire, ±1 palier max (pas de sauts brutaux)
         const int SmoothPasses = 2;
         var smoothedSteps = new int[tileCount];
 
@@ -267,13 +256,10 @@ public class HexPlanetGenerator : MonoBehaviour
             for (int i = 0; i < tileCount; i++)
             {
                 if (tileBiomeSteps[i] == 0) { smoothedSteps[i] = 0; continue; }
-
                 var nbs = GetTileNeighbors(i);
                 if (nbs.Count == 0) { smoothedSteps[i] = tileBiomeSteps[i]; continue; }
-
                 var counts = new Dictionary<int, int>();
-                int majority = tileBiomeSteps[i];
-                int bestCount = 0;
+                int majority = tileBiomeSteps[i], bestCount = 0;
                 foreach (int ni in nbs)
                 {
                     int ns = tileBiomeSteps[ni];
@@ -284,17 +270,15 @@ public class HexPlanetGenerator : MonoBehaviour
                 }
                 smoothedSteps[i] = (Random.value < 0.70f) ? majority : tileBiomeSteps[i];
             }
-
             for (int i = 0; i < tileCount; i++)
                 if (tileBiomeSteps[i] != 0) tileBiomeSteps[i] = smoothedSteps[i];
         }
 
-        // ── 4. Recalcul des élévations depuis les steps lissés
         for (int i = 0; i < tileCount; i++)
         {
             int step = tileBiomeSteps[i];
             if (step == 0) { tileElevations[i] = 0f; continue; }
-            int elevStep = (step == 3) ? 2 : step; // Forêt → même hauteur que plaine
+            int elevStep = (step == 3) ? 2 : step;
             tileElevations[i] = elevStep * 0.20f;
         }
 
@@ -308,17 +292,17 @@ public class HexPlanetGenerator : MonoBehaviour
         float lat  = Mathf.Abs(tileCenters[i].y);
         int   step = (tileBiomeSteps.Count > i) ? tileBiomeSteps[i] : 0;
 
-        if (e == 0f)    return new Color(0.06f, 0.20f, 0.60f);   // Océan
-        if (step == 1)  return new Color(0.88f, 0.82f, 0.58f);   // Plage
-        if (lat > 0.82f) return new Color(0.92f, 0.96f, 1.00f);  // Polaire
-        if (step == 2)  return new Color(0.40f, 0.70f, 0.20f);   // Plaine
-        if (step == 3)  return new Color(0.15f, 0.48f, 0.10f);   // Forêt
+        if (e == 0f)    return new Color(0.06f, 0.20f, 0.60f);
+        if (step == 1)  return new Color(0.88f, 0.82f, 0.58f);
+        if (lat > 0.82f) return new Color(0.92f, 0.96f, 1.00f);
+        if (step == 2)  return new Color(0.40f, 0.70f, 0.20f);
+        if (step == 3)  return new Color(0.15f, 0.48f, 0.10f);
         if (step == 4)  return lat > 0.60f
-                            ? new Color(0.52f, 0.60f, 0.44f)     // Toundra
-                            : new Color(0.52f, 0.48f, 0.40f);    // Montagne
+                            ? new Color(0.52f, 0.60f, 0.44f)
+                            : new Color(0.52f, 0.48f, 0.40f);
         return lat > 0.50f
-            ? new Color(0.92f, 0.96f, 1.00f)                     // Neige
-            : new Color(0.48f, 0.44f, 0.40f);                    // Pic
+            ? new Color(0.92f, 0.96f, 1.00f)
+            : new Color(0.48f, 0.44f, 0.40f);
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -334,7 +318,6 @@ public class HexPlanetGenerator : MonoBehaviour
         for (int i = 0; i < tileCount; i++)
         {
             float e = tileElevations[i];
-            // Eau (e==0) → rayon fixe au niveau de la mer ; terre → rayon selon palier
             R[i] = PlanetRadius + (e == 0f ? 0.20f : e) * ElevationScale;
         }
 
@@ -357,7 +340,7 @@ public class HexPlanetGenerator : MonoBehaviour
             { mT.Add(b); mT.Add(b+3); mT.Add(b+1); mT.Add(b); mT.Add(b+2); mT.Add(b+3); }
         }
 
-        // ── PASS 1 : INSET TOP FACES ──────────────────────────────
+        // PASS 1 : INSET TOP FACES
         for (int vi = 0; vi < tileCount; vi++)
         {
             var fids = vertFaces[vi];
@@ -378,7 +361,7 @@ public class HexPlanetGenerator : MonoBehaviour
                 { mT.Add(b); mT.Add(b+1+ci); mT.Add(b+1+(ci+1)%inC.Count); }
         }
 
-        // ── PASS 2 : EDGE STRIPS AND CLIFFS ───────────────────────
+        // PASS 2 : EDGE STRIPS AND CLIFFS
         var processed = new HashSet<long>();
 
         for (int vi = 0; vi < tileCount; vi++)
@@ -390,7 +373,6 @@ public class HexPlanetGenerator : MonoBehaviour
                 var sf = vertFaces[vi].Intersect(vertFaces[ni]).ToList();
                 if (sf.Count < 2) continue;
 
-                // Les raw0/raw1 sont les coins jittés → strips suivent automatiquement
                 Vector3 raw0 = faceCentroids[sf[0]];
                 Vector3 raw1 = faceCentroids[sf[1]];
 
@@ -404,18 +386,14 @@ public class HexPlanetGenerator : MonoBehaviour
                 if (absDiff <= CliffThreshold)
                 {
                     bool sameBiome = ColorsSimilar(tileColors[vi], tileColors[ni], 0.08f);
-    
-                    // Strip entre plaine et voisin → gris
-                    bool plainsEdge = Mathf.Abs(tileElevations[vi] - 0.40f) < 0.05f 
+                    bool plainsEdge = Mathf.Abs(tileElevations[vi] - 0.40f) < 0.05f
                                 || Mathf.Abs(tileElevations[ni] - 0.40f) < 0.05f;
 
                     Color fc;
                     if (plainsEdge && !sameBiome)
                         fc = new Color(0.50f, 0.50f, 0.50f);
-                    else if (sameBiome)
-                        fc = Color.Lerp(tileColors[vi], tileColors[ni], 0.5f);
                     else
-                        fc = Color.Lerp(tileColors[vi], tileColors[ni], 0.5f) * (1f);
+                        fc = Color.Lerp(tileColors[vi], tileColors[ni], 0.5f);
 
                     AddQuad(a0, a1, b0, b1, fc, fc);
                 }
@@ -428,49 +406,38 @@ public class HexPlanetGenerator : MonoBehaviour
                     Vector3 l0 = aHigh ? b0 : a0,  l1 = aHigh ? b1 : a1;
 
                     Color hiC  = tileColors[hiTile];
-
-                    // Cliffs grises pour les plaines (elevation == 0.40), sinon couleur dérivée du biome
                     float hiElev = tileElevations[hiTile];
                     Color cliff;
                     if (Mathf.Abs(hiElev - 0.40f) < 0.1f)
-                    {
-                        // Plaine → falaise grise rocheuse
-                        Debug.Log("BIP");
-                        cliff = new Color(1f, 0f, 0f);
-                    }
+                        cliff = new Color(0.50f, 0.48f, 0.44f);
                     else
-                    {
                         cliff = new Color(
                             hiC.r * 0.50f + 0.08f,
                             hiC.g * 0.42f + 0.06f,
                             hiC.b * 0.30f + 0.05f);
-                    }
 
                     AddQuad(h0, h1, l0, l1, cliff, cliff * 0.65f);
                 }
             }
         }
 
-        // ── PASS 3 : CORNER TRIANGLE FILLS ────────────────────────
+        // PASS 3 : CORNER TRIANGLE FILLS
         int faceCount = faceCentroids.Count;
-
         for (int fi = 0; fi < faceCount; fi++)
         {
             int t0 = facesFlat[fi*3];
             int t1 = facesFlat[fi*3+1];
             int t2 = facesFlat[fi*3+2];
 
-            // Le coin jitté est le même pour les 3 tuiles → pas de trou
             Vector3 raw = faceCentroids[fi];
             Vector3 p0  = IC(t0, raw) * R[t0];
             Vector3 p1  = IC(t1, raw) * R[t1];
             Vector3 p2  = IC(t2, raw) * R[t2];
 
-            // Même biome pour les 3 tuiles → triangle de coin invisible (pas d'assombrissement)
             bool sameCorner = ColorsSimilar(tileColors[t0], tileColors[t1], 0.08f)
                            && ColorsSimilar(tileColors[t1], tileColors[t2], 0.08f);
             Color avg = (tileColors[t0] + tileColors[t1] + tileColors[t2]) / 3f;
-            Color c   = sameCorner ? avg : avg * (1f);
+            Color c   = sameCorner ? avg : avg;
 
             Vector3 n   = Vector3.Cross(p1-p0, p2-p0);
             Vector3 mid = (p0+p1+p2)/3f;
@@ -485,7 +452,6 @@ public class HexPlanetGenerator : MonoBehaviour
                 { mT.Add(b); mT.Add(b+2); mT.Add(b+1); }
         }
 
-        // ── Assemble mesh ──────────────────────────────────────────
         var mesh = new Mesh { name = "HexPlanet" };
         mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
         mesh.SetVertices(mV);
@@ -506,15 +472,105 @@ public class HexPlanetGenerator : MonoBehaviour
     }
 
     // ══════════════════════════════════════════════════════════════
+    // STEP 4 – Atmosphere sphere
+    // ══════════════════════════════════════════════════════════════
+    void StepBuildAtmosphere()
+    {
+        if (!ShowAtmosphere) return;
+
+        // ── Build smooth UV sphere ──────────────────────────────────
+        float atmoRadius = PlanetRadius * AtmosphereScale;
+        Mesh atmoMesh = BuildSphereMesh(atmoRadius, 32, 24);
+
+        // ── Material ───────────────────────────────────────────────
+        Material mat = AtmosphereMaterial;
+
+        if (mat == null)
+        {
+            // Auto-create material from the Atmosphere shader
+            var shader = Shader.Find("Custom/Atmosphere");
+            if (shader == null)
+            {
+                Debug.LogWarning("[HexPlanet] Atmosphere shader 'Custom/Atmosphere' not found. " +
+                                 "Make sure Atmosphere.shader is imported in your project.");
+                // Fallback to a simple transparent standard shader
+                shader = Shader.Find("Universal Render Pipeline/Lit");
+            }
+            mat = new Material(shader) { name = "AtmosphereMat_Generated" };
+        }
+
+        // Push properties into the material instance
+        if (mat.HasProperty("_AtmoColor"))     mat.SetColor("_AtmoColor",    AtmosphereColor);
+        if (mat.HasProperty("_RimColor"))      mat.SetColor("_RimColor",     AtmosphereRimColor);
+        if (mat.HasProperty("_FresnelPower"))  mat.SetFloat("_FresnelPower", AtmospherePower);
+        if (mat.HasProperty("_Intensity"))     mat.SetFloat("_Intensity",    AtmosphereIntensity);
+        if (mat.HasProperty("_InnerOpacity"))  mat.SetFloat("_InnerOpacity", AtmosphereInnerOpacity);
+        if (mat.HasProperty("_RimWidth"))      mat.SetFloat("_RimWidth",     AtmosphereRimWidth);
+
+        // ── GameObject ─────────────────────────────────────────────
+        var go = new GameObject("Atmosphere");
+        go.transform.SetParent(transform, false);
+        go.AddComponent<MeshFilter>().sharedMesh        = atmoMesh;
+        go.AddComponent<MeshRenderer>().sharedMaterial  = mat;
+
+        // No collider on the atmosphere — raycasts should hit the planet mesh
+        Debug.Log($"[HexPlanet] Atmosphere built (radius={atmoRadius:F2}).");
+    }
+
+    /// <summary>
+    /// Builds a smooth UV sphere with inverted normals (for inside-out rendering).
+    /// <paramref name="stacks"/> = latitude rings, <paramref name="slices"/> = longitude segments.
+    /// </summary>
+    static Mesh BuildSphereMesh(float radius, int slices, int stacks)
+    {
+        var verts  = new List<Vector3>();
+        var norms  = new List<Vector3>();
+        var tris   = new List<int>();
+
+        for (int st = 0; st <= stacks; st++)
+        {
+            float phi    = Mathf.PI * st / stacks;          // 0 → PI (pole → pole)
+            float sinPhi = Mathf.Sin(phi);
+            float cosPhi = Mathf.Cos(phi);
+
+            for (int sl = 0; sl <= slices; sl++)
+            {
+                float theta    = 2f * Mathf.PI * sl / slices;
+                float sinTheta = Mathf.Sin(theta);
+                float cosTheta = Mathf.Cos(theta);
+
+                var n = new Vector3(sinPhi * cosTheta, cosPhi, sinPhi * sinTheta);
+                verts.Add(n * radius);
+                norms.Add(-n);   // Invert normals → Fresnel reads outward face from inside
+            }
+        }
+
+        for (int st = 0; st < stacks; st++)
+        for (int sl = 0; sl < slices; sl++)
+        {
+            int a = st * (slices + 1) + sl;
+            int b = a  + slices + 1;
+
+            // Winding reversed (matches inverted normals)
+            tris.Add(a);   tris.Add(a+1); tris.Add(b);
+            tris.Add(b);   tris.Add(a+1); tris.Add(b+1);
+        }
+
+        var mesh = new Mesh { name = "AtmosphereSphere" };
+        mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+        mesh.SetVertices(verts);
+        mesh.SetNormals(norms);
+        mesh.SetTriangles(tris, 0);
+        mesh.RecalculateBounds();
+        return mesh;
+    }
+
+    // ══════════════════════════════════════════════════════════════
     // INTERACTION
     // ══════════════════════════════════════════════════════════════
     public int GetClosestTileId(Vector3 localDir)
     {
-        if (tileCount == 0)
-        {
-            Debug.LogWarning("[HexPlanet] GetClosestTileId called but tileCount=0.");
-            return -1;
-        }
+        if (tileCount == 0) { Debug.LogWarning("[HexPlanet] tileCount=0."); return -1; }
         int best=-1; float bestDot=-2f;
         for (int i=0;i<tileCount;i++)
         {
@@ -541,12 +597,11 @@ public class HexPlanetGenerator : MonoBehaviour
         if (id < 0 || id >= tileCount) return "Invalid";
         float lat  = Mathf.Abs(tileCenters[id].y);
         int   step = (tileBiomeSteps.Count > id) ? tileBiomeSteps[id] : 0;
-
         if (step == 0)  return "Ocean";
         if (step == 1)  return "Beach";
         if (lat > 0.82f) return "Polar";
         if (step == 2)  return "Plains";
-        if (step == 3)  return "Forest";   // ← maintenant correct
+        if (step == 3)  return "Forest";
         if (step == 4)  return lat > 0.60f ? "Tundra" : "Mountain";
         return lat > 0.50f ? "Snow" : "Peak";
     }
@@ -554,7 +609,6 @@ public class HexPlanetGenerator : MonoBehaviour
     // ══════════════════════════════════════════════════════════════
     // UTILITIES
     // ══════════════════════════════════════════════════════════════
-    // Retourne vrai si deux couleurs sont proches (même biome visuel)
     static bool ColorsSimilar(Color a, Color b, float threshold) =>
         Mathf.Abs(a.r - b.r) < threshold &&
         Mathf.Abs(a.g - b.g) < threshold &&

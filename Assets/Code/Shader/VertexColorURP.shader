@@ -20,6 +20,15 @@ Shader "Custom/VertexColorURP"
             Name "ForwardLit"
             Tags { "LightMode" = "UniversalForward" }
 
+            // ── Stencil : marque chaque pixel de la planète avec 1 ──
+            // L'atmosphère lit ce stencil et saute les pixels marqués.
+            Stencil
+            {
+                Ref   1
+                Comp  Always   // toujours écrire
+                Pass  Replace  // écrit Ref=1 dans le stencil buffer
+            }
+
             HLSLPROGRAM
             #pragma vertex vert
             #pragma fragment frag
@@ -99,7 +108,7 @@ Shader "Custom/VertexColorURP"
             ENDHLSL
         }
 
-        // ── DepthOnly (requis par URP pour le prepass) ────────────
+        // ── DepthOnly ─────────────────────────────────────────────
         Pass
         {
             Name "DepthOnly"
