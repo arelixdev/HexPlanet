@@ -52,6 +52,10 @@ public class HexPlanetGenerator : MonoBehaviour
 
     [SerializeField] private List<int> facesFlat = new List<int>();
 
+    // ── Per-tile sorted raw corners (face centroids) ───────────────
+    [SerializeField] private List<Vector3> cornerFlat    = new List<Vector3>();
+    [SerializeField] private List<int>     cornerOffsets = new List<int>();
+
     // Non-serialised
     private List<List<int>> vertFaces     = new List<List<int>>();
     private List<Vector3>   faceCentroids = new List<Vector3>();
@@ -63,6 +67,17 @@ public class HexPlanetGenerator : MonoBehaviour
         int start = neighborOffsets[id];
         int end   = (id + 1 < neighborOffsets.Count) ? neighborOffsets[id + 1] : neighborFlat.Count;
         return neighborFlat.GetRange(start, end - start);
+    }
+
+    /// <summary>Returns the sorted raw face-centroid corners of tile <paramref name="id"/>.</summary>
+    public List<Vector3> GetTileRawCorners(int id)
+    {
+        if (cornerOffsets == null || id < 0 || id >= cornerOffsets.Count)
+            return new List<Vector3>();
+        int start = cornerOffsets[id];
+        int end   = (id + 1 < cornerOffsets.Count) ? cornerOffsets[id + 1] : cornerFlat.Count;
+        if (end <= start) return new List<Vector3>();
+        return cornerFlat.GetRange(start, end - start);
     }
 
     public int     TileCount                => tileCount;
@@ -94,6 +109,7 @@ public class HexPlanetGenerator : MonoBehaviour
         tileCenters.Clear(); tileElevations.Clear(); tileColors.Clear();
         neighborFlat.Clear(); neighborOffsets.Clear();
         facesFlat.Clear();
+        cornerFlat.Clear(); cornerOffsets.Clear();
         vertFaces.Clear(); faceCentroids.Clear();
         tileCount = 0;
 
@@ -102,7 +118,7 @@ public class HexPlanetGenerator : MonoBehaviour
         StepBuildIcoSphere();
         StepGenerateTerrain();
         StepBuildMesh();
-        StepBuildAtmosphere();   // ← NEW
+        StepBuildAtmosphere();
 
         Debug.Log($"[HexPlanet] {tileCount} tiles generated (subdivisions={Subdivisions})");
 
@@ -341,9 +357,16 @@ public class HexPlanetGenerator : MonoBehaviour
         }
 
         // PASS 1 : INSET TOP FACES
+        // Also records each tile's sorted raw corners for hover outline use.
+        cornerFlat.Clear(); cornerOffsets.Clear();
+
         for (int vi = 0; vi < tileCount; vi++)
         {
             var fids = vertFaces[vi];
+
+            // Always record offset even for degenerate tiles
+            cornerOffsets.Add(cornerFlat.Count);
+
             if (fids.Count < 3) continue;
 
             float   r      = R[vi];
@@ -351,6 +374,10 @@ public class HexPlanetGenerator : MonoBehaviour
             Vector3 centre = tileCenters[vi];
 
             var rawC = SortAround(centre, fids.Select(fi => faceCentroids[fi]).ToList());
+
+            // ── Store corners so TileHoverOutline can query them ──
+            cornerFlat.AddRange(rawC);
+
             var inC  = rawC.Select(c => IC(vi, c)).ToList();
 
             int b = mV.Count;
@@ -478,28 +505,22 @@ public class HexPlanetGenerator : MonoBehaviour
     {
         if (!ShowAtmosphere) return;
 
-        // ── Build smooth UV sphere ──────────────────────────────────
         float atmoRadius = PlanetRadius * AtmosphereScale;
         Mesh atmoMesh = BuildSphereMesh(atmoRadius, 32, 24);
 
-        // ── Material ───────────────────────────────────────────────
         Material mat = AtmosphereMaterial;
 
         if (mat == null)
         {
-            // Auto-create material from the Atmosphere shader
             var shader = Shader.Find("Custom/Atmosphere");
             if (shader == null)
             {
-                Debug.LogWarning("[HexPlanet] Atmosphere shader 'Custom/Atmosphere' not found. " +
-                                 "Make sure Atmosphere.shader is imported in your project.");
-                // Fallback to a simple transparent standard shader
+                Debug.LogWarning("[HexPlanet] Atmosphere shader 'Custom/Atmosphere' not found.");
                 shader = Shader.Find("Universal Render Pipeline/Lit");
             }
             mat = new Material(shader) { name = "AtmosphereMat_Generated" };
         }
 
-        // Push properties into the material instance
         if (mat.HasProperty("_AtmoColor"))     mat.SetColor("_AtmoColor",    AtmosphereColor);
         if (mat.HasProperty("_RimColor"))      mat.SetColor("_RimColor",     AtmosphereRimColor);
         if (mat.HasProperty("_FresnelPower"))  mat.SetFloat("_FresnelPower", AtmospherePower);
@@ -507,20 +528,14 @@ public class HexPlanetGenerator : MonoBehaviour
         if (mat.HasProperty("_InnerOpacity"))  mat.SetFloat("_InnerOpacity", AtmosphereInnerOpacity);
         if (mat.HasProperty("_RimWidth"))      mat.SetFloat("_RimWidth",     AtmosphereRimWidth);
 
-        // ── GameObject ─────────────────────────────────────────────
         var go = new GameObject("Atmosphere");
         go.transform.SetParent(transform, false);
         go.AddComponent<MeshFilter>().sharedMesh        = atmoMesh;
         go.AddComponent<MeshRenderer>().sharedMaterial  = mat;
 
-        // No collider on the atmosphere — raycasts should hit the planet mesh
         Debug.Log($"[HexPlanet] Atmosphere built (radius={atmoRadius:F2}).");
     }
 
-    /// <summary>
-    /// Builds a smooth UV sphere with inverted normals (for inside-out rendering).
-    /// <paramref name="stacks"/> = latitude rings, <paramref name="slices"/> = longitude segments.
-    /// </summary>
     static Mesh BuildSphereMesh(float radius, int slices, int stacks)
     {
         var verts  = new List<Vector3>();
@@ -529,7 +544,7 @@ public class HexPlanetGenerator : MonoBehaviour
 
         for (int st = 0; st <= stacks; st++)
         {
-            float phi    = Mathf.PI * st / stacks;          // 0 → PI (pole → pole)
+            float phi    = Mathf.PI * st / stacks;
             float sinPhi = Mathf.Sin(phi);
             float cosPhi = Mathf.Cos(phi);
 
@@ -541,7 +556,7 @@ public class HexPlanetGenerator : MonoBehaviour
 
                 var n = new Vector3(sinPhi * cosTheta, cosPhi, sinPhi * sinTheta);
                 verts.Add(n * radius);
-                norms.Add(-n);   // Invert normals → Fresnel reads outward face from inside
+                norms.Add(-n);
             }
         }
 
@@ -551,7 +566,6 @@ public class HexPlanetGenerator : MonoBehaviour
             int a = st * (slices + 1) + sl;
             int b = a  + slices + 1;
 
-            // Winding reversed (matches inverted normals)
             tris.Add(a);   tris.Add(a+1); tris.Add(b);
             tris.Add(b);   tris.Add(a+1); tris.Add(b+1);
         }

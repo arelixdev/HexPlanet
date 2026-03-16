@@ -1,24 +1,19 @@
 using UnityEngine;
 
 /// <summary>
-/// Orbit camera around the planet (planet stays still).
-/// • Drag  → orbit (azimuth + elevation)
-/// • Scroll → zoom
-/// • Click  → tile selection (unchanged)
-/// • Auto-orbit when idle
+/// Orbit camera + hover outline.
+/// • Hover  → outline blanc pulsant sur la tuile sous le curseur.
+/// • A      → toggle blanc / vert sur l'outline (suit toujours la tuile survolée).
 /// </summary>
 public class PlanetController : MonoBehaviour
 {
-    // ── Inspector ──────────────────────────────────────────────────
     [Header("Orbit")]
-    [Tooltip("Degrees per pixel dragged.")]
     public float OrbitSensitivity = 0.35f;
-    [Tooltip("Slow auto-orbit speed (deg/sec) when not dragging.")]
     public float AutoOrbitSpeed   = 6f;
     public bool  AutoRotate       = true;
 
     [Header("Zoom")]
-    public float ZoomSpeed  = 5f;
+    public float ZoomSpeed   = 5f;
     public float MinDistance = 8f;
     public float MaxDistance = 40f;
 
@@ -26,58 +21,45 @@ public class PlanetController : MonoBehaviour
     public HexPlanetGenerator Generator;
     public bool ShowTileDebug = true;
 
-    // ── Private state ──────────────────────────────────────────────
+    [Header("Hover Outline")]
+    public TileHoverOutline HoverOutline;
+
+    // ── Private ────────────────────────────────────────────────────
     private Camera _cam;
+    private float  _azimuth   = 30f;
+    private float  _elevation = 25f;
+    private float  _distance  = 22f;
 
-    // Spherical coords (degrees)
-    private float _azimuth   =  30f;   // horizontal angle around Y
-    private float _elevation =  25f;   // vertical angle from equator
-    private float _distance  =  22f;   // camera distance from planet centre
-
-    // Drag bookkeeping
     private Vector3 _mouseDownPos;
     private bool    _clickValid;
-    private Vector3 _dragLastPos = Vector3.zero;
+    private Vector3 _dragLastPos;
 
-    // UI
     private int _lastHighlightedTile = -1;
+    private int _hoveredTile         = -1;
 
-    const float DragThreshold = 5f;   // pixels before drag is recognised
+    const float DragThreshold = 5f;
 
     // ──────────────────────────────────────────────────────────────
     void Start()
     {
         _cam = Camera.main;
-
-        // Initialise distance from current camera position so the scene
-        // view position is respected on first play.
         if (_cam != null)
             _distance = Mathf.Clamp(
                 Vector3.Distance(_cam.transform.position, transform.position),
                 MinDistance, MaxDistance);
-
         ApplyCameraTransform();
-
-        // Safety checks
-        var meshChild = transform.Find("HexPlanetMesh");
-        if (meshChild == null)
-            Debug.LogWarning("[PlanetController] HexPlanetMesh not found — generate the planet first.");
-        else if (meshChild.GetComponent<MeshCollider>() == null)
-            Debug.LogWarning("[PlanetController] No MeshCollider on HexPlanetMesh — regenerate the planet!");
-        else
-            Debug.Log("[PlanetController] Ready. MeshCollider detected.");
     }
 
-    // ──────────────────────────────────────────────────────────────
     void Update()
     {
-        HandleInput();
+        HandleMouse();
+        HandleHover();
+        HandleKeyboard();
     }
 
     // ──────────────────────────────────────────────────────────────
-    void HandleInput()
+    void HandleMouse()
     {
-        // ── Mouse button down ──────────────────────────────────────
         if (Input.GetMouseButtonDown(0))
         {
             _mouseDownPos = Input.mousePosition;
@@ -85,48 +67,36 @@ public class PlanetController : MonoBehaviour
             _dragLastPos  = Input.mousePosition;
         }
 
-        // ── While held ────────────────────────────────────────────
         if (Input.GetMouseButton(0))
         {
             Vector3 delta = Input.mousePosition - _mouseDownPos;
-
             if (_clickValid && delta.magnitude > DragThreshold)
-                _clickValid = false;    // too much movement → it's a drag
+                _clickValid = false;
 
             if (!_clickValid)
             {
-                Vector3 d = Input.mousePosition - _dragLastPos;
-
-                // Horizontal drag → azimuth (left/right orbit)
-                _azimuth += d.x * OrbitSensitivity;
-
-                // Vertical drag → elevation (up/down orbit)
+                Vector3 d  = Input.mousePosition - _dragLastPos;
+                _azimuth   += d.x * OrbitSensitivity;
                 _elevation += d.y * OrbitSensitivity;
                 _elevation  = Mathf.Clamp(_elevation, -89f, 89f);
-
                 _dragLastPos = Input.mousePosition;
                 ApplyCameraTransform();
             }
         }
 
-        // ── Release ───────────────────────────────────────────────
         if (Input.GetMouseButtonUp(0))
         {
-            if (_clickValid)
-                TrySelectTile();
-
+            if (_clickValid) TrySelectTile();
             _clickValid  = false;
             _dragLastPos = Vector3.zero;
         }
 
-        // ── Auto-orbit when no mouse button pressed ───────────────
         if (AutoRotate && !Input.GetMouseButton(0))
         {
             _azimuth += AutoOrbitSpeed * Time.deltaTime;
             ApplyCameraTransform();
         }
 
-        // ── Zoom ──────────────────────────────────────────────────
         float scroll = Input.GetAxis("Mouse ScrollWheel");
         if (Mathf.Abs(scroll) > 0.001f)
         {
@@ -137,73 +107,90 @@ public class PlanetController : MonoBehaviour
     }
 
     // ──────────────────────────────────────────────────────────────
-    /// <summary>
-    /// Reposition the camera on its spherical orbit around the planet.
-    /// The planet transform is NOT touched.
-    /// </summary>
-    void ApplyCameraTransform()
+    void HandleHover()
     {
-        if (_cam == null) return;
+        if (HoverOutline == null || Generator == null || _cam == null) return;
 
-        // Convert spherical → Cartesian (Y-up)
-        float azRad  = _azimuth   * Mathf.Deg2Rad;
-        float elRad  = _elevation * Mathf.Deg2Rad;
-
-        Vector3 dir = new Vector3(
-            Mathf.Cos(elRad) * Mathf.Sin(azRad),
-            Mathf.Sin(elRad),
-            Mathf.Cos(elRad) * Mathf.Cos(azRad)
-        );
-
-        Vector3 planetPos = transform.position;
-        _cam.transform.position = planetPos + dir * _distance;
-        _cam.transform.LookAt(planetPos, Vector3.up);
-    }
-
-    // ──────────────────────────────────────────────────────────────
-    void TrySelectTile()
-    {
-        if (Generator == null)
+        if (Input.GetMouseButton(0))
         {
-            Debug.LogWarning("[PlanetController] Generator not assigned in Inspector!");
+            HoverOutline.HideHover();
+            _hoveredTile = -1;
             return;
         }
 
         Ray ray = _cam.ScreenPointToRay(Input.mousePosition);
-        Debug.DrawRay(ray.origin, ray.direction * 50f, Color.yellow, 2f);
-
         if (!Physics.Raycast(ray, out var hit, 500f))
         {
-            Debug.Log("[PlanetController] Raycast: nothing hit.");
+            HoverOutline.HideHover();
+            _hoveredTile = -1;
             return;
         }
 
         bool hitPlanet = hit.transform == transform
                       || hit.transform.IsChildOf(transform);
-
         if (!hitPlanet)
         {
-            Debug.Log($"[PlanetController] Hit '{hit.transform.name}' — not the planet.");
+            HoverOutline.HideHover();
+            _hoveredTile = -1;
             return;
         }
 
-        // World → local normalised direction
         Vector3 localHit = Generator.transform.InverseTransformPoint(hit.point).normalized;
         int tileId = Generator.GetClosestTileId(localHit);
-
         if (tileId < 0)
         {
-            Debug.Log("[PlanetController] GetClosestTileId returned -1.");
+            HoverOutline.HideHover();
+            _hoveredTile = -1;
             return;
         }
 
-        _lastHighlightedTile = tileId;
-
-        if (ShowTileDebug)
-            Debug.Log(Generator.GetTileInfo(tileId));
+        _hoveredTile = tileId;
+        HoverOutline.ShowTile(tileId);
     }
 
     // ──────────────────────────────────────────────────────────────
+    void HandleKeyboard()
+    {
+        if (!Input.GetKeyDown(KeyCode.A)) return;
+
+        if (HoverOutline == null)
+        {
+            Debug.LogWarning("[PlanetController] HoverOutline non assigné !");
+            return;
+        }
+
+        // Toggle la couleur de l'outline (blanc ↔ vert), peu importe la tuile
+        HoverOutline.ToggleColor();
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    void ApplyCameraTransform()
+    {
+        if (_cam == null) return;
+        float azRad = _azimuth   * Mathf.Deg2Rad;
+        float elRad = _elevation * Mathf.Deg2Rad;
+        Vector3 dir = new Vector3(
+            Mathf.Cos(elRad) * Mathf.Sin(azRad),
+            Mathf.Sin(elRad),
+            Mathf.Cos(elRad) * Mathf.Cos(azRad));
+        _cam.transform.position = transform.position + dir * _distance;
+        _cam.transform.LookAt(transform.position, Vector3.up);
+    }
+
+    void TrySelectTile()
+    {
+        if (Generator == null) return;
+        Ray ray = _cam.ScreenPointToRay(Input.mousePosition);
+        if (!Physics.Raycast(ray, out var hit, 500f)) return;
+        bool hitPlanet = hit.transform == transform || hit.transform.IsChildOf(transform);
+        if (!hitPlanet) return;
+        Vector3 localHit = Generator.transform.InverseTransformPoint(hit.point).normalized;
+        int tileId = Generator.GetClosestTileId(localHit);
+        if (tileId < 0) return;
+        _lastHighlightedTile = tileId;
+        if (ShowTileDebug) Debug.Log(Generator.GetTileInfo(tileId));
+    }
+
     void OnGUI()
     {
         if (!ShowTileDebug || _lastHighlightedTile < 0 || Generator == null) return;
