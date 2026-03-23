@@ -16,7 +16,6 @@ public class TileObjectSpawner : MonoBehaviour
     [Range(1, 20)]    public int   FirMaxPerTile      = 4;
     [Range(0.5f, 5f)] public float FirScale           = 1f;
     [Range(0f, 0.5f)] public float FirScaleRandom     = 0.25f;
-    /// <summary>Material utilisant le shader Custom/FirTreeSnow.</summary>
     public Material FirMaterial;
 
     // ══════════════════════════════════════════════════════════════
@@ -28,10 +27,6 @@ public class TileObjectSpawner : MonoBehaviour
     [Range(1, 20)]    public int   DomeMaxPerTile     = 3;
     [Range(0.5f, 5f)] public float DomeScale          = 1f;
     [Range(0f, 0.5f)] public float DomeScaleRandom    = 0.20f;
-    /// <summary>
-    /// Écrasement / allongement vertical du dôme.
-    /// 0.6 = aplati (savane), 1.0 = sphère, 1.4 = allongé (palmier).
-    /// </summary>
     [Range(0.4f, 2f)] public float DomeFlattenY       = 1.0f;
     public Material DomeMaterial;
 
@@ -39,13 +34,38 @@ public class TileObjectSpawner : MonoBehaviour
     // RÈGLE DE MÉLANGE PAR LATITUDE
     // ══════════════════════════════════════════════════════════════
     [Header("Mélange Dôme ↔ Pin (latitude)")]
-    /// <summary>
-    /// En-dessous de cette latitude (|center.y|) → 100 % dômes.
-    /// Au-dessus de PinOnlyLatitude             → 100 % pins.
-    /// Entre les deux, interpolation linéaire.
-    /// </summary>
     [Range(0f, 1f)] public float DomeOnlyLatitude = 0.10f;
     [Range(0f, 1f)] public float PinOnlyLatitude  = 0.60f;
+
+    // ══════════════════════════════════════════════════════════════
+    // ROCHERS (plaines – step 2)
+    // ══════════════════════════════════════════════════════════════
+    [Header("Rochers (plaines)")]
+    public bool SpawnRocks = true;
+
+    [Tooltip("Probabilité qu'une tile de plaine reçoive des rochers (0=aucune, 1=toutes).")]
+    [Range(0f, 1f)] public float RockTileChance   = 0.35f;
+
+    [Tooltip("Nombre minimum de rochers par tile choisie.")]
+    [Range(1, 3)]   public int   RockMinPerTile   = 2;
+
+    [Tooltip("Nombre maximum de rochers par tile choisie.")]
+    [Range(1, 3)]   public int   RockMaxPerTile   = 3;
+
+    [Range(0.3f, 4f)] public float RockScale       = 1f;
+    [Range(0f, 0.6f)] public float RockScaleRandom = 0.40f;
+
+    [Tooltip("Taille de base du rocher.")]
+    [Range(0.03f, 0.20f)] public float RockBaseSize = 0.07f;
+
+    [Tooltip("Fraction du rayon de la tile utilisée pour le placement (0=centre, 1=bord).")]
+    [Range(0.05f, 0.60f)] public float RockSpreadRadius = 0.30f;
+
+    [Tooltip("Enfoncement dans le sol (valeur positive = descend vers le centre de la planète).")]
+    [Range(0f, 0.5f)] public float RockSinkOffset = 0.20f;
+
+    [Tooltip("Material VertexColorURP recommandé. Laissez vide pour le fallback auto.")]
+    public Material RockMaterial;
 
     // ══════════════════════════════════════════════════════════════
     // CRISTAUX DE MONTAGNE
@@ -61,6 +81,7 @@ public class TileObjectSpawner : MonoBehaviour
     public bool ShowDebugLogs = false;
 
     private GameObject _container;
+    private int _rockSeedCounter;
 
     // ──────────────────────────────────────────────────────────────
     [ContextMenu("Spawn Objects")]
@@ -72,8 +93,10 @@ public class TileObjectSpawner : MonoBehaviour
         _container = new GameObject("TileObjects");
         _container.transform.SetParent(transform, false);
         Random.InitState(Generator.Seed + 1337);
+        _rockSeedCounter = Generator.Seed * 9973;
 
-        int spawnedFir = 0, spawnedDome = 0, spawnedCrystal = 0;
+        int spawnedFir = 0, spawnedDome = 0, spawnedCrystal = 0, spawnedRock = 0;
+        int rockTilesChosen = 0;
 
         for (int i = 0; i < Generator.TileCount; i++)
         {
@@ -83,15 +106,12 @@ public class TileObjectSpawner : MonoBehaviour
             if (step == 3 && (SpawnFirTrees || SpawnDomeTrees))
             {
                 float lat = Mathf.Abs(Generator.GetTileCenter(i).y);
-
-                // pinRatio : 0 = 100 % dômes, 1 = 100 % pins
                 float pinRatio = Mathf.Clamp01(
                     Mathf.InverseLerp(DomeOnlyLatitude, PinOnlyLatitude, lat));
 
                 int firCount  = SpawnFirTrees  ? Mathf.RoundToInt(FirMaxPerTile  * FirDensity  * pinRatio)        : 0;
                 int domeCount = SpawnDomeTrees ? Mathf.RoundToInt(DomeMaxPerTile * DomeDensity * (1f - pinRatio)) : 0;
 
-                // Liste de positions partagée → évite les chevauchements entre les deux types
                 var sharedPlaced = new List<(Vector3 dir, float foot)>();
 
                 if (domeCount > 0)
@@ -101,12 +121,22 @@ public class TileObjectSpawner : MonoBehaviour
                                               DomeScale, DomeScaleRandom,
                                               DomeMaterial, sharedPlaced);
                 }
-
                 if (firCount > 0)
                 {
                     spawnedFir += SpawnOnTile(i, new FirTreeShape(), firCount,
                                              FirScale, FirScaleRandom,
                                              FirMaterial, sharedPlaced);
+                }
+            }
+
+            // ── Rochers (step 2 = plaines) ─────────────────────────
+            if (SpawnRocks && step == 2)
+            {
+                if (Random.value < RockTileChance)
+                {
+                    rockTilesChosen++;
+                    int count = Random.Range(RockMinPerTile, RockMaxPerTile + 1);
+                    spawnedRock += SpawnRocksOnTile(i, count);
                 }
             }
 
@@ -120,7 +150,8 @@ public class TileObjectSpawner : MonoBehaviour
             }
         }
 
-        Debug.Log($"[Spawner] {spawnedDome} dômes  |  {spawnedFir} pins  |  {spawnedCrystal} cristaux");
+        Debug.Log($"[Spawner] {spawnedDome} dômes  |  {spawnedFir} pins  |  " +
+                  $"{spawnedRock} rochers sur {rockTilesChosen} tiles plaine  |  {spawnedCrystal} cristaux");
     }
 
     [ContextMenu("Clear Objects")]
@@ -133,11 +164,6 @@ public class TileObjectSpawner : MonoBehaviour
     }
 
     // ──────────────────────────────────────────────────────────────
-    /// <summary>
-    /// Pose <paramref name="maxCount"/> objets sur la tuile <paramref name="tileId"/>.
-    /// <paramref name="sharedPlaced"/> : liste de positions déjà occupées (partagée
-    /// entre plusieurs appels sur la même tuile pour éviter les chevauchements).
-    /// </summary>
     int SpawnOnTile(int tileId, TileShape shape, int maxCount,
                     float baseScale, float scaleRandom, Material mat,
                     List<(Vector3 dir, float foot)> sharedPlaced)
@@ -147,7 +173,6 @@ public class TileObjectSpawner : MonoBehaviour
         float   surfR       = Generator.PlanetRadius
                             + (elev == 0f ? 0.20f : elev) * Generator.ElevationScale;
 
-        // Rayon sûr = moitié de la distance au voisin le plus proche
         float minChord = float.MaxValue;
         foreach (int nId in Generator.GetTileNeighbors(tileId))
             minChord = Mathf.Min(minChord,
@@ -155,10 +180,9 @@ public class TileObjectSpawner : MonoBehaviour
 
         float safeRadiusLocal = minChord * 0.5f;
 
-        // Repère tangent local à la tuile
-        Vector3 n = centerLocal;
-        Vector3 t = Vector3.Cross(n, Mathf.Abs(n.y) < 0.9f ? Vector3.up : Vector3.right).normalized;
-        Vector3 b = Vector3.Cross(n, t);
+        Vector3 n      = centerLocal;
+        Vector3 t      = Vector3.Cross(n, Mathf.Abs(n.y) < 0.9f ? Vector3.up : Vector3.right).normalized;
+        Vector3 b      = Vector3.Cross(n, t);
         Vector3 nWorld = transform.TransformDirection(n).normalized;
 
         float FootLocal(float s) => GetShapeFootprint(shape) * s / surfR;
@@ -177,7 +201,6 @@ public class TileObjectSpawner : MonoBehaviour
             Vector3 offsetLocal = (t * Mathf.Cos(angle) + b * Mathf.Sin(angle)) * dist;
             Vector3 dirLocal    = (n + offsetLocal).normalized;
 
-            // Vérifie l'overlap contre toutes les positions déjà placées (tous types)
             bool overlaps = false;
             foreach (var (pd, pr) in sharedPlaced)
                 if (Vector3.Distance(dirLocal, pd) < footLocal + pr) { overlaps = true; break; }
@@ -199,15 +222,90 @@ public class TileObjectSpawner : MonoBehaviour
         }
 
         if (ShowDebugLogs)
-            Debug.Log($"[Spawner] Tile {tileId} → {spawned}/{maxCount} '{shape.GetType().Name}' spawned");
+            Debug.Log($"[Spawner] Tile {tileId} → {spawned}/{maxCount} '{shape.GetType().Name}'");
 
         return spawned;
     }
 
+    // ──────────────────────────────────────────────────────────────
+    int SpawnRocksOnTile(int tileId, int count)
+    {
+        Vector3 centerLocal = Generator.GetTileCenter(tileId);
+        float   elev        = Generator.GetTileElevation(tileId);
+        float   surfR       = Generator.PlanetRadius
+                            + (elev == 0f ? 0.20f : elev) * Generator.ElevationScale;
+
+        // RockSinkOffset enfonce le rocher vers le centre de la planète
+        float spawnR = surfR - RockSinkOffset;
+
+        float minChord = float.MaxValue;
+        foreach (int nId in Generator.GetTileNeighbors(tileId))
+            minChord = Mathf.Min(minChord,
+                Vector3.Distance(centerLocal, Generator.GetTileCenter(nId)));
+
+        float spawnZone = minChord * 0.5f * RockSpreadRadius;
+
+        Vector3 n      = centerLocal;
+        Vector3 tan    = Vector3.Cross(n, Mathf.Abs(n.y) < 0.9f ? Vector3.up : Vector3.right).normalized;
+        Vector3 bitan  = Vector3.Cross(n, tan);
+        Vector3 nWorld = transform.TransformDirection(n).normalized;
+
+        var placed      = new List<(Vector3 dir, float foot)>();
+        int spawned     = 0;
+        int maxAttempts = count * 30;
+
+        for (int attempt = 0; attempt < maxAttempts && spawned < count; attempt++)
+        {
+            int rockSeed = _rockSeedCounter++;
+
+            var shape = new RockShape
+            {
+                Seed     = rockSeed,
+                BaseSize = RockBaseSize
+            };
+
+            float s         = RockScale * (1f + Random.Range(-RockScaleRandom, RockScaleRandom));
+            float footLocal = (shape.Footprint * s) / surfR * 1.50f;
+
+            float angle = Random.Range(0f, Mathf.PI * 2f);
+            float dist  = Mathf.Sqrt(Random.value) * spawnZone;
+
+            Vector3 offsetLocal = (tan * Mathf.Cos(angle) + bitan * Mathf.Sin(angle)) * dist;
+            Vector3 dirLocal    = (n + offsetLocal).normalized;
+
+            bool overlaps = false;
+            foreach (var (pd, pr) in placed)
+                if (Vector3.Distance(dirLocal, pd) < footLocal + pr) { overlaps = true; break; }
+            if (overlaps) continue;
+
+            // spawnR < surfR → le rocher est positionné légèrement sous la surface
+            Vector3    worldPos = transform.TransformPoint(dirLocal * spawnR);
+            Quaternion rot      = Quaternion.FromToRotation(Vector3.up, nWorld)
+                                * Quaternion.AngleAxis(Random.Range(0f, 360f), Vector3.up);
+
+            var go = new GameObject($"Rock_{tileId}_{spawned}_s{rockSeed}");
+            go.transform.SetParent(_container.transform, false);
+            go.transform.position = worldPos;
+            go.transform.rotation = rot;
+            go.AddComponent<MeshFilter>().sharedMesh       = shape.Build(s);
+            go.AddComponent<MeshRenderer>().sharedMaterial = RockMaterial ?? MakeFallbackMat();
+
+            placed.Add((dirLocal, footLocal));
+            spawned++;
+        }
+
+        if (ShowDebugLogs)
+            Debug.Log($"[Spawner] Tile {tileId} → {spawned}/{count} rochers (sink={RockSinkOffset})");
+
+        return spawned;
+    }
+
+    // ──────────────────────────────────────────────────────────────
     float GetShapeFootprint(TileShape shape) => shape switch
     {
         FirTreeShape  f => f.Footprint,
         DomeTreeShape d => d.Footprint,
+        RockShape     r => r.Footprint,
         PyramidShape  p => p.BaseSize * 0.6f,
         ConeShape     c => c.Radius,
         CrystalShape  x => x.BaseSize * 0.6f,
@@ -216,8 +314,8 @@ public class TileObjectSpawner : MonoBehaviour
 
     Material MakeFallbackMat()
     {
-        var s = Shader.Find("Custom/FirTreeSnow")
-             ?? Shader.Find("Custom/VertexColorURP")
+        var s = Shader.Find("Custom/VertexColorURP")
+             ?? Shader.Find("Custom/FirTreeSnow")
              ?? Shader.Find("Standard");
         return new Material(s);
     }
