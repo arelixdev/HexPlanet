@@ -531,7 +531,10 @@ public class HexPlanetGenerator : MonoBehaviour
         var go = new GameObject("Atmosphere");
         go.transform.SetParent(transform, false);
         go.AddComponent<MeshFilter>().sharedMesh        = atmoMesh;
-        go.AddComponent<MeshRenderer>().sharedMaterial  = mat;
+        var atmoMR = go.AddComponent<MeshRenderer>();
+        atmoMR.sharedMaterial        = mat;
+        atmoMR.shadowCastingMode     = UnityEngine.Rendering.ShadowCastingMode.Off;
+        atmoMR.receiveShadows        = false;
 
         Debug.Log($"[HexPlanet] Atmosphere built (radius={atmoRadius:F2}).");
     }
