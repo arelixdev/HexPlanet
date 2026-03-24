@@ -241,6 +241,7 @@ public class HexPlanetGenerator : MonoBehaviour
         for (int i=0;i<tileCount;i++)
             tileElevations[i]=Mathf.InverseLerp(eMin,eMax,tileElevations[i]);
 
+        // ── Assignation initiale des steps (sans step 1 / plage) ──
         for (int i = 0; i < tileCount; i++)
         {
             if (tileElevations[i] < SeaLevel)
@@ -252,8 +253,7 @@ public class HexPlanetGenerator : MonoBehaviour
             {
                 float t = Mathf.InverseLerp(SeaLevel, 1f, tileElevations[i]);
                 int step;
-                if      (t < 0.12f) step = 1;
-                else if (t < 0.35f) step = 2;
+                if      (t < 0.35f) step = 2;
                 else if (t < 0.50f) step = 3;
                 else if (t < 0.88f) step = 4;
                 else                step = 5;
@@ -264,6 +264,7 @@ public class HexPlanetGenerator : MonoBehaviour
             }
         }
 
+        // ── Lissage des biomes ─────────────────────────────────────
         const int SmoothPasses = 2;
         var smoothedSteps = new int[tileCount];
 
@@ -290,12 +291,29 @@ public class HexPlanetGenerator : MonoBehaviour
                 if (tileBiomeSteps[i] != 0) tileBiomeSteps[i] = smoothedSteps[i];
         }
 
+        // ── Recalcul des élévations après lissage ──────────────────
         for (int i = 0; i < tileCount; i++)
         {
             int step = tileBiomeSteps[i];
             if (step == 0) { tileElevations[i] = 0f; continue; }
             int elevStep = (step == 3) ? 2 : step;
             tileElevations[i] = elevStep * 0.20f;
+        }
+
+        // ── Plages : toute tile terrestre adjacente à l'eau → step 1 ──
+        // Doit se faire APRÈS le lissage pour épouser les vrais contours.
+        for (int i = 0; i < tileCount; i++)
+        {
+            if (tileBiomeSteps[i] == 0) continue;   // ignorer l'eau elle-même
+            foreach (int ni in GetTileNeighbors(i))
+            {
+                if (tileBiomeSteps[ni] == 0)
+                {
+                    tileBiomeSteps[i]  = 1;      // step 1 = Beach
+                    tileElevations[i]  = 0.20f;  // même hauteur que step 1 normal
+                    break;
+                }
+            }
         }
 
         for (int i = 0; i < tileCount; i++)
@@ -308,14 +326,14 @@ public class HexPlanetGenerator : MonoBehaviour
         float lat  = Mathf.Abs(tileCenters[i].y);
         int   step = (tileBiomeSteps.Count > i) ? tileBiomeSteps[i] : 0;
 
-        if (e == 0f)    return new Color(0.06f, 0.20f, 0.60f);
-        if (step == 1)  return new Color(0.88f, 0.82f, 0.58f);
+        if (e == 0f)     return new Color(0.06f, 0.20f, 0.60f);
+        if (step == 1)   return new Color(0.88f, 0.82f, 0.58f);
         if (lat > 0.82f) return new Color(0.92f, 0.96f, 1.00f);
-        if (step == 2)  return new Color(0.40f, 0.70f, 0.20f);
-        if (step == 3)  return new Color(0.15f, 0.48f, 0.10f);
-        if (step == 4)  return lat > 0.60f
-                            ? new Color(0.52f, 0.60f, 0.44f)
-                            : new Color(0.52f, 0.48f, 0.40f);
+        if (step == 2)   return new Color(0.40f, 0.70f, 0.20f);
+        if (step == 3)   return new Color(0.15f, 0.48f, 0.10f);
+        if (step == 4)   return lat > 0.60f
+                             ? new Color(0.52f, 0.60f, 0.44f)
+                             : new Color(0.52f, 0.48f, 0.40f);
         return lat > 0.50f
             ? new Color(0.92f, 0.96f, 1.00f)
             : new Color(0.48f, 0.44f, 0.40f);
@@ -357,14 +375,12 @@ public class HexPlanetGenerator : MonoBehaviour
         }
 
         // PASS 1 : INSET TOP FACES
-        // Also records each tile's sorted raw corners for hover outline use.
         cornerFlat.Clear(); cornerOffsets.Clear();
 
         for (int vi = 0; vi < tileCount; vi++)
         {
             var fids = vertFaces[vi];
 
-            // Always record offset even for degenerate tiles
             cornerOffsets.Add(cornerFlat.Count);
 
             if (fids.Count < 3) continue;
@@ -375,7 +391,6 @@ public class HexPlanetGenerator : MonoBehaviour
 
             var rawC = SortAround(centre, fids.Select(fi => faceCentroids[fi]).ToList());
 
-            // ── Store corners so TileHoverOutline can query them ──
             cornerFlat.AddRange(rawC);
 
             var inC  = rawC.Select(c => IC(vi, c)).ToList();
@@ -614,12 +629,12 @@ public class HexPlanetGenerator : MonoBehaviour
         if (id < 0 || id >= tileCount) return "Invalid";
         float lat  = Mathf.Abs(tileCenters[id].y);
         int   step = (tileBiomeSteps.Count > id) ? tileBiomeSteps[id] : 0;
-        if (step == 0)  return "Ocean";
-        if (step == 1)  return "Beach";
+        if (step == 0)   return "Ocean";
+        if (step == 1)   return "Beach";
         if (lat > 0.82f) return "Polar";
-        if (step == 2)  return "Plains";
-        if (step == 3)  return "Forest";
-        if (step == 4)  return lat > 0.60f ? "Tundra" : "Mountain";
+        if (step == 2)   return "Plains";
+        if (step == 3)   return "Forest";
+        if (step == 4)   return lat > 0.60f ? "Tundra" : "Mountain";
         return lat > 0.50f ? "Snow" : "Peak";
     }
 
